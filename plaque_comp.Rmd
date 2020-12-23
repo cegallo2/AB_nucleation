@@ -1,0 +1,1275 @@
+---
+title: "Plaque Composition Analysis"
+output: html_document
+---
+
+## Introduction
+
+For amyloid to form,  Aβ must be nucleated into aggregated Aβ seeds. Fibril formation is
+characterized by this slow nucleation step, proceeded by a fast growth phase. Recent studies show
+the presence of certain proteins at the center of Aβ plaques, most notably FAM222A and MBP have been
+discovered at the core of plaques. These studies suggest there are proteins that could potentially
+promote primary nucleation. Nucleation can be promoted by several other factors such as positively
+charged metal ions (Cu2+) and low pH levels. However, only a handful studies have examined
+protein-based nucleation. Here, we look at the protein composition of these plaques and identify
+potential nucleators, proteins that promote Aβ42 nucleation. We define several basic conditions for
+potential nuceators: (1) A nucleator must have a attractive charge interaction with Aβ42 that is
+balanced with the repulsive self-interaction of Aβ42; (2) There is sufficient attractive potential
+between the nucleator and Aβ42 to accommodate multiple strands of Aβ42; (3) There is
+specific-interaction potential with the N-terminal end of Aβ42. We analyzed these conditions by
+evaluating the charge-composition of these plaque proteins with pH ranging from the theoretical
+isoelectric point of Aβ42, 5.31, to standard physiological pH, 7.4. Here, we determine a list of
+nucleator candidates and examine biologically known associations of these proteins with APP-related
+proteins via STRING network analysis. In a separate part, we follow this by examining differential
+expression in both bulk and single-cell RNAseq.
+
+
+
+```{r include=FALSE}
+#All Libraries
+setwd("/Users/gallops/Documents/AB_nucleation");
+library(dplyr,quietly=TRUE);
+library(uwot,quietly=TRUE);
+library(protr,quietly=TRUE);
+library(Peptides,quietly=TRUE);
+library(WGCNA,quietly=TRUE);
+library(RColorBrewer,quietly=TRUE);
+library(igraph,quietly=TRUE);
+library(ggplot2,quietly=TRUE);
+library(leiden,quietly=TRUE);
+library(dbscan,quietly=TRUE);
+
+```
+
+## Preprocessing
+
+A protein composition list was obtained from Drummond et al.(see link at bottom). The proteomics
+data set was derived using label-free quantitative LC–MS/MS. The list consist of 279 proteins that were
+consistently found in the plaques of 30 AD individuals. They provide intensities, the relative 
+expressions in the 30 individuals and the UniProt IDs for the respective proteins. The original intent
+of the study was to differentiate the composition of plaques between sAD and rpAD patients. However, 
+we use all of the proteins that are found in all individuals. Protein sequences were obtained using the
+given UniProt IDs. Only 1 of the 279 proteins were unidentified in the UniProt database and removed from
+the dataset. Furthermore, two additional sequences were added to the dataset: Aβ42 and FAM222A.
+FAM222A has only been recently discovered via GWAS on AD patients and hasn't even been fully characterized
+to date. However, a recent experimental study has suggested that it is found in the core of Aβ aggregates
+and exacerbates Aβ aggregation in AD mouse model under intracerebroventricular infusion (forced expression).
+
+
+```{r include=FALSE}
+drummond_all <- read.table(file = 'plaque_comp_data/Drummond_all_proteins.csv',
+                        sep = ',',
+                        header = TRUE,
+                        stringsAsFactor=FALSE)
+drummond_all[drummond_all==""] <- "NA"
+drummond_all[["every.Name"]] <- drummond_all[["Gene.names"]]
+drummond_all[["Gene.names"]] <- sapply(strsplit(drummond_all$Gene.names,";"), head, 1)
+
+drummond_all[["every.ID"]] <- drummond_all[["Protein.IDs"]]
+drummond_all[["Protein.IDs"]] <- sapply(strsplit(drummond_all$Protein.IDs,";"), head, 1)
+drummond_all[["Protein.IDs"]] <- sapply(strsplit(drummond_all$Protein.IDs,"-"), head, 1)
+
+
+```
+
+
+
+```{r include=FALSE}
+gene.names <- c("FAM222A",drummond_all$Gene.names)
+protein.ids <- c("Q5U5X8",drummond_all$Protein.IDs)
+
+drummond_df <- data.frame(gene.names,protein.ids)
+write.table(t(as.matrix(protein.ids)),"plaque_comp_data/drummond_IDs.tsv",sep = ' ',row.names=FALSE,col.names=FALSE,quote=FALSE)
+```
+
+
+
+
+```{r include=FALSE}
+drummond_seq <- read.table(file = 'plaque_comp_data/drummond_sequences.tsv',
+                        sep = '\t',
+                        header = TRUE,
+                        stringsAsFactor=FALSE)
+drummond_seq <- drummond_seq[,2:6]
+drummond_seq[drummond_seq==""] <- "NA"
+drummond_seq[["every.Name"]] <- drummond_seq[["Gene.names"]]
+drummond_seq[["Gene.names"]] <- sapply(strsplit(drummond_seq$Gene.names," "), head, 1)
+ab42 <- c("AB42","reviewed","AB42","DAEFRHDSGYEVHHQKLVFFAEDVGSNKGAIIGLMVGGVVIA","AB42_HUMAN","AB42")
+
+drummond_seq <- rbind(ab42,drummond_seq)
+```
+
+
+
+
+
+
+
+```{r include=FALSE}
+#Checking to see if mismatched entry ID is due to use of synoyms
+mismatch <- drummond_all[!(drummond_all$Protein.IDs %in% drummond_seq$Entry),]
+paste(c("Number of mismatched identifiers: ",toString(dim(mismatch)[1])))
+mismatch1 <-  unlist(strsplit(mismatch$every.ID[1],";"))
+mismatch1 <- length(mismatch1[mismatch1 %in% drummond_seq$Entry]) > 0
+paste(c("1st Mismatch with Other Identifiers: ",toString(mismatch1)))
+mismatch2 <-  unlist(strsplit(mismatch$every.ID[2],";"))
+mismatch2 <- length(mismatch2[mismatch2 %in% drummond_seq$Entry]) > 0
+paste(c("2nd Mismatch with Other Identifiers: ",toString(mismatch2)))
+
+#Both mismatches are due to use of synonymic identifiers
+
+all_unique <- length(unique(drummond_seq$Entry))==length(drummond_seq$Entry)
+paste(c("All cases unique: ",toString(all_unique)))
+
+```
+
+
+
+```{r include=FALSE}
+profiles <- data.frame(row.names=drummond_seq$Gene.names,
+                     gene.names=drummond_seq$Gene.names,
+                     lengthpep=lengthpep(drummond_seq$Sequence),
+                     entry=drummond_seq$Entry,
+                     every.gene=drummond_seq$every.Name,
+                     sequence=drummond_seq$Sequence)
+profiles[profiles$gene.names=="SEPTIN5",]$gene.names <- "SEPT5"
+profiles[profiles$gene.names=="SEPTIN7",]$gene.names <- "SEPT7"
+profiles[profiles$gene.names=="SEPTIN8",]$gene.names <- "SEPT8"
+profiles[profiles$gene.names=="SEPTIN11",]$gene.names <- "SEPT11"
+profiles[profiles$gene.names=="EEF1A1P5",]$gene.names <- "EEF1A1"
+profiles[profiles$gene.names=="AARS1",]$gene.names <- "AARS"
+profiles[profiles$gene.names=="HBA1;",]$gene.names <- "HBA1"
+profiles[profiles$gene.names=="H4C1",]$gene.names <- "HIST1H4A"
+profiles[profiles$gene.names=="ATP5PO",]$gene.names <- "ATP5O"
+
+
+rownames(profiles) <- profiles$gene.names
+profiles <- profiles[!(profiles$gene.names=="NA"),]
+
+```
+
+
+## Selecting pKa Scale for Net Charge Prediction
+
+We start the investigation by calculating sequence-based theoretical net charge of our proteins.
+The first is the theoretical net charge as predicted using the pKa scale derived by Bjellqvist.
+Specifically, we used the R package Peptides to perform this calcuation for the
+whole dataset. The Bjellqvist scale was chosen due to the fact that it showed optimal performance
+in a benchmark study of isoelectric point (pI) prediction. This pKa scaled showed to give the lowest RMSD 
+values, second to an SVM method, when predicting pI. It also showed to be the have the most
+consistent RMSD score for various types of proteins. Out of all the pKa scales, it one of the most
+established and heavily used pKa scales. It also showed the best performance when predicting the
+theoretical isoelectric point of Aβ42. The plot shows the pI predictions of each of the available scales
+as well as error bars with the peptide RMSD values calculated in the benchmark study. The dashed line shows
+the pH 5.5 at which optimal Aβ42 aggregation occurs. The solid line is theoretical pI prediceted by the
+Bjellqvist scales. As can be seen, the EMBOSS and Sillero scales predict the pI almost exactly at this
+point. This could, in fact, suggest that Aβ42 optimally self-aggregates at its isoelectric. However, pKa
+scales only give rough approximations of the net charge and the predictions given by any scale should not
+be interpreted with heavy weight. For the purposes of this study, all of the scales give the same
+results when selecting candidate nucleators. Considering these reasons, the Bjellqvist scale was selected
+to due to its accuracy, consistency and previous use in another relevant study.
+
+```{r, echo=FALSE}
+#Test pK scales
+ab42.sequence <- "DAEFRHDSGYEVHHQKLVFFAEDVGSNKGAIIGLMVGGVVIA"
+pKscales <- c("Bjellqvist", "EMBOSS", "Lehninger", "Rodwell", "Sillero", "Solomon")
+pI.predicts <- c()
+
+for (pKscale in pKscales) {
+  pI.predicts <- c(pI.predicts,pI(ab42.sequence,pKscale=pKscale))
+}
+
+#From benchmark study
+pI.RMSDs <- c(0.28,0.48,0.71,0.31,0.46,0.71)
+
+```
+
+```{r, echo=FALSE}
+
+pK.colors <- rep("gray",length(pKscales))
+pK.colors[pKscales=="Bjellqvist"] <- "black" 
+plot(pI.predicts,col = pK.colors,ylim=c(4.5,6.5),pch=16,cex=3,xaxt="n",
+     main="Evaluating pKa Scales", xlab="",ylab="Isoelectric Point (pI)")
+
+abline(h= 5.311137,col="black",lwd=3,lty="solid")
+abline(h= 5.5,col="black",lwd=3,lty="dashed")
+legend(1, 6.5, legend=c("Theoretical pI","Optimum Aggregation"),
+       col=c("black","black"),lty=c("solid","dashed"),lwd=3)
+
+ticks <- seq(1,length(pKscales))
+abline(v=ticks,col=alpha("gray",0.2))
+axis(side = 1, at = ticks,labels=pKscales)
+
+arrows(x0=ticks, y0=pI.predicts-pI.RMSDs, x1=ticks, y1=pI.predicts+pI.RMSDs, code=3, angle=90, length=0.1)
+```
+
+## Residue Charges of Aβ42
+
+First, the theoretical charge was calculated for each residue of the Aβ42 polypeptide over 
+for pHs ranging from 5.3 to 7.4. The four most pH responsive residues in Aβ42 are the N-terminal
+aspartic acid (D) and the three histidine (H) residiues close within the N-terminal half of the
+chain. The other negatively charged residues consist of 2 aspartic acids (D), 3 glutamic acids (E)
+and the C-terminal alanine (A). The positively charged residues consist of 1 arginine (R) and two
+2 lysines (A). As a results, the net charge of Aβ42 shifts from -3.34 to 0 over pHs 7.4 to 5.3. This
+small shift in charge may seem insignificant at first. When considering the abundance and
+size of AB42, this shift in charge is quite significant. 
+
+
+
+```{r include=FALSE}
+ab42.sequence <- "DAEFRHDSGYEVHHQKLVFFAEDVGSNKGAIIGLMVGGVVIA"
+ab42.pHs <- seq(5.3,7.4,.1)
+ab42.charges <- c()
+for (pH in ab42.pHs){
+  cter <- 10^(pH-3.55)
+  cter <- -cter/(cter+1)
+  nter <- 1/10^(pH-7.50)
+  nter <- nter/(nter+1)
+
+  temp.charges <- charge(strsplit(ab42.sequence,split="")[[1]],pH=pH,pKscale="Bjellqvist")-cter-nter
+  temp.charges[1] <- temp.charges[1] + nter
+  temp.charges[length(temp.charges)] <- temp.charges[length(temp.charges)] + cter
+  ab42.charges <- cbind(ab42.charges,temp.charges)
+}
+
+colnames(ab42.charges) <- ab42.pHs
+ab42.charges <- ab42.charges[,rev(colnames(ab42.charges))]
+rownames(ab42.charges) <- strsplit(ab42.sequence,split="")[[1]]
+
+```
+
+
+
+```{r, fig.width=12,fig.height=7, echo=FALSE}
+getPalette <- colorRampPalette(brewer.pal(11,"RdYlBu"))
+pH.colors <- alpha(getPalette(length(ab42.pHs)),0.8)
+matplot(ab42.charges,t='p',pch=16,cex=2,col=pH.colors,xlim=c(2,44),xaxt="n",
+        main="Abeta(1-42) Residue Charges", ylab="Charge")
+points(rowMeans(ab42.charges),pch=16,cex=2,col="gray10")
+lines(rowMeans(ab42.charges),lty="solid",col="gray10")
+ticks = seq(1,nrow(ab42.charges))
+abline(v=ticks,col=alpha("gray",0.2))
+
+legend(42.5, 1, legend=c("AVG",ab42.pHs),col=c("gray10",pH.colors),pch=16,cex=1,title="pH")
+
+axis(side = 1, at = ticks,labels=strsplit(ab42.sequence,split="")[[1]],cex.axis=0.8)
+```
+
+## Histidine Abundance
+
+Another interesting feature of AB42 is the number of histidine residues located near the N-terminal
+end of the chain. The experimental study ofFAM222A nucleation noted that FAM222A specifically binds
+to the N-terminal end of Aβ42. Histidineis important for maintenance of myelin sheaths that protect
+nerve cells and is metabolized to the neurotransmitter histamine.
+
+"PULLED FROM LITERATURE"
+The molecular interactions of histidine with other amino acids and metallic cations in proteins can be
+classified into the following five types:
+
+(1) Cation-π interaction. The side chain imidazole of His is an aromatic ring. Histidine can take part
+in the cation-π interactions as the aromatic motif with metallic cations or organic cations (protonated
+amino acids, Lys+ and Arg+). On the other hand, the protonated His+ is an organic cation, which can join
+the cation-π interactions as an organic cation with other aromatic amino acids (Phe, Tyr, and Trp).
+
+(2) π-π stacking interaction. The imidazole structure of histidine side chain is a conjugative
+π-plane, which can make π-π stacking interactions with the aromatic side chains of other amino acids
+(Phe, Tyr, and Trp).
+
+(3) hydrogen-π interaction. The polar hydrogen atom of histidine can form hydrogen-π bond with other
+aromatic amino acids in ‘T’ orientation.
+
+(4) Coordinate bond interaction. The basic nitrogen atom in the imidazole of histidine has a lone
+electron pair that make it a coordinate ligand of metallic cations, such as Zn2+, Ca2+ and Cu2+.
+
+(5)Hydrogen bond interaction. The polar hydrogen atom of the imidazole is a hydrogen-bond donor,
+and the basic nitrogen atom is a hydrogen-bond acceptor.
+"PULLED FROM LITERATURE"
+
+
+There are 3 phenylalanines (F) and 1 tyrosine (Y) located within Aβ42. Intermolecular hydrogen-π
+interactions form within Aβ42 or intramolecular hydrogen-π interactions with other chains seems
+insignificant in nucletion considering Aβ42 is mostly amorphously collapsed and such interactions
+would require specific orientations that would rarely occur. This rules out interaction types (2) & (3).
+
+The binding Aβ42 to multivalent cationic metals via histidine is well known as mentioned before but would
+only apply to metal-Aβ42 interactions. This rules out interaction type (4).
+
+The interaction types that would apply to protein-based nucleation are mostly-likely to be cation-π
+interactions and hydrogen bond interactions. 
+
+
+## Charge-based Descriptors
+
+Outside the realm of histidine, charge-to-charge interactions have the longest range coompared to any
+other type. A strong nucleator and Aβ42 should be attracted to each other of long distances (at 10-20A).
+Therefore, the charge composition of Aβ42 and other proteins should play a critical in the role nucleation
+of Aβ42 seeds. For this reason, we will classify the plaque proteins and quantify interactions with Aβ42
+using charge-based descriptors.
+
+Using the Bjellqvist pKa scale, the theoretical net charge was computed for all 280 proteins for pH 
+ranging from 5.3 to 7.4 with 0.01 intervals. Another important parameter to consider is the amino acid (AA) length of each protein. 
+The net charge of each protein is normalized by its AA length, giving the linear charge density. The linear charge
+density is a common variable used polyelectroyte theory to describe polyelectrolyte aggregation and coarse-grained
+several studies have focused on its impact on generic polyelectrolyte aggregation. Here, we use it as a measure
+for pH-responsiveness and as a descriptor for unsupervised clustering of our proteins.
+
+```{r include=FALSE}
+
+# Charges over pH range (5.8-7.4)
+pHs <- seq(5.3,7.4,.01)
+pH.cols <- paste("charge",as.character(pHs),sep="")
+
+pKscale <- "Bjellqvist"
+seq.charges <- data.frame(row.names=rownames(profiles))
+for (pH in pHs){
+  seq.charges[[paste("charge",as.character(pH),sep="")]] <- charge(profiles$sequence,pH=pH,pKscale=pKscale)
+}
+
+
+# Charge Densities over pH range (5.8-7.4)
+seq.densities <- seq.charges/profiles$lengthpep
+
+sum.lengths <- matrix(rep(profiles$lengthpep,length(profiles$lengthpep)),
+                      nrow=length(profiles$lengthpep),ncol=length(profiles$lengthpep))
+sum.lengths <- sum.lengths + t(sum.lengths)
+rownames(sum.lengths) <- rownames(seq.densities)
+colnames(sum.lengths) <- rownames(seq.densities)
+
+# Gradient of Charge Densities over pH range (5.8-7.4)
+seq.gradient <- (seq.densities[,2:length(seq.densities)]-seq.densities[,1:length(seq.densities)-1])/.01
+
+
+# Combined charge score over pH range (5.8-7.4)
+seq.combined <- sign(seq.charges)*sqrt((seq.charges^2)/profiles$lengthpep)
+
+# Amino Acid Composition
+AAC <- c()
+for (sequence in profiles$sequence){
+  AAC <- rbind(AAC,extractAAC(sequence))
+}
+AAC <- as.data.frame(AAC)
+rownames(AAC) <- profiles$gene.names
+
+```
+
+
+## UMAP Transform for Clustering
+
+The Uniform Manifold Approximation and Projection (UMAP) algorithm as implemented in the uwot
+R package was used to transform the charge density feature space. The reason for using UMAP transform
+was to store the plaque protein feature space in a way that could be applied to larger list of proteins
+for downstream analysis. Furthermore, making use of the UMAP embedding space makes clustering less
+ambiguous and aids in the repeatability in downstream analysis, especially when using HDBSCAN.
+The goal of clustering proteins in this part of the analysis is to simply filter our proteins into
+broad groups so that we can identify potential nucleator candidates and not to groupthem discretely
+based on strict relationships such as homology or secondary structure.
+
+The charge densities were transformed into 8 UMAP components using a Euclidean distance metric. The
+reason for selecting 8 components was to accommodate the optimum feature space rule which is defined by: 
+
+Number of Samples = 2^(Number of Features) -> Number of Features = log2(Number of Samples)
+
+Since we have 280 proteins we should use ~8 features (i.e. UMAP components) for clustering. Selected
+parameters include 8 number of neighbors for the KNN graph and a negative sample rate of 8.
+Since the UMAP embedding output is dependent on the selected random seed. This transform was
+performed 10 separate times using 10 different random seeds. A Euclidean distance matrix was
+computed for each UMAP embedding to provide a averaged distance matrix that could be used
+for HDBSCAN clustering. Each of the 10 UMAP transforms were stored for later application.
+
+
+
+```{r include=FALSE}
+random.states <- c(258,44,270,124,108,9,268,48,233,36)
+
+density.umap.dist <- matrix(0L,nrow=dim(seq.densities)[1],ncol=dim(seq.densities)[1])
+
+for (random.state in random.states) {
+  set.seed(random.state)
+  temp.dist <- umap(seq.densities,metric="euclidean",n_neighbors = 8,n_components=8,negative_sample_rate = 8)
+  temp.dist <- as.matrix(dist(temp.dist,method="euclidean"))
+  density.umap.dist <- density.umap.dist+temp.dist
+}
+rm(temp.dist)
+density.umap.dist <- density.umap.dist/length(random.states)
+
+```
+
+
+## Clustering with HDBSCAN
+
+Hierarchical Density-based Spatial Clustering of Applications with Noise (HDBSCAN) was 
+used for clustering the plaque proteins UMAP transform space. The purpose of using HDSCAN
+is too identify strong clusters and too disclude proteins that do not easily fit a cluster 
+profile. At this point in the analysis, it is not needed effectively cluster such a small 
+dataset of 280 proteins. However, it plays an important role in the downstream analysis when
+we're analyzing ~10,000-20,000 proteins. The minimum size of the clusters was selected to be
+8, considering we are using only 8 UMAP components. Here, only 3 proteins were unsuccessfully
+clustered (colored in gray). The HDBSCAN dendrogram is shown below with the corresponding
+random cluster colors for as well as cluster colors corresponding to charge density ranging from
+red to blue for negative and positive charges, respectively.
+
+
+```{r, echo=FALSE}
+set.seed(1)
+hc <- hdbscan(as.dist(density.umap.dist),minPts=8)
+clusters <- hc$cluster
+hc <- hc$hc
+k <- length(unique(clusters))
+
+set.seed(1)
+new.clusters <- clusters
+i = 1
+for (clust.id in unique(clusters)){
+  new.clusters <- replace( new.clusters,clusters==clust.id,seq(length(unique(clusters)))[i] )
+  i <- i + 1
+}
+
+# Ordering cluster colors by mean charge at pH=7.4
+clust.orders <- data.frame(clusters=new.clusters,charge7.4=seq.densities[,dim(seq.densities)[2]])
+clust.orders <- aggregate(clust.orders[,2],list(clust.orders$clusters),median)
+colnames(clust.orders) <- c("clusters","mean")
+clust.orders <- clust.orders[order(clust.orders$clusters),]
+clust.orders <- rank(clust.orders$mean)
+
+getPalette <- colorRampPalette(brewer.pal(11,"RdYlBu"))
+charge.colors <- (getPalette(k)[clust.orders])[new.clusters]
+
+new.clusters[clusters==0] <- 0
+clusters <- new.clusters
+rm(new.clusters)
+
+
+charge.colors[clusters==0] <- "gray90"
+
+clust.colors <- labels2colors(clusters)
+clust.colors[clusters==0] <- "gray90"
+
+clust.scale <- unique(clust.colors)
+
+
+profiles[["clusters"]] <- clusters
+profiles[["cluster.colors"]] <- clust.colors
+profiles[["charge.colors"]] <- charge.colors
+
+```
+
+```{r include=FALSE}
+#write.table(profiles,"plaque_comp_data/profiles.tsv",sep="\t",row.names=FALSE,col.names=TRUE,quote=FALSE)
+```
+
+
+
+```{r, echo=FALSE}
+plotDendroAndColors(hc, cbind(charge.colors,clust.colors),
+                    c("Charge Densities","HDBSCAN"),
+                    dendroLabels = FALSE, hang = 0.03,
+                    addGuide = TRUE, guideHang = 0.05,
+                    main = "UMAP Clusters")
+
+```
+
+
+
+
+
+## Cluster Visualization
+We can visualize these clusters of 2 component UMAP embedding of the charge densities.As can
+be seen, the HDSCAN protein clustering of the 8-component embedding visually agrees with the 
+2-component embedding.
+
+
+```{r, echo=FALSE}
+#Create Visualization with labels
+set.seed(1)
+intersect.umap <- umap(seq.densities,metric="euclidean",n_neighbors = 8,n_components=2,negative_sample_rate = 2)
+
+label.umap <-c()
+for (clust.id in unique(clusters)){
+  label.umap <- rbind(label.umap,colMeans(intersect.umap[clusters==as.character(clust.id),,drop=FALSE]))
+}
+rownames(label.umap) <- unique(clusters)
+rownames(label.umap)[rownames(label.umap)=="0"] <- ""
+```
+
+
+
+The plot below shows the 2-component UMAP embedding of the cluster. The clusters are labeled
+by number and colored randomly for easy visual identification.
+
+```{r, echo=FALSE, fig.width=9, fig.height=9}
+par(pty="s")
+plot(intersect.umap[,1], intersect.umap[,2],pch=21,cex = 1.2,col="gray50",
+     main="UMAP Clusters: Colored by Cluster", xlab="UMAP1", ylab="UMAP2")#,
+#     xlim=c(-12,6),ylim=c(-8,4))
+points(intersect.umap[,1], intersect.umap[,2],pch=20,cex = 1.2,col=alpha(clust.colors,0.5),asp=1)
+text(label.umap[,1], label.umap[,2], labels=rownames(label.umap),cex = 1.6,col="black",asp=1)
+#text(intersect.umap[,1], intersect.umap[,2], labels=rownames(label.umap),cex = 1.6,col="black",asp=1)
+```
+
+
+The plot below is same as the above plot. However, the clusters are colored by their 
+average charge density. As can be seen, cluster 2 has the highest negative charge density,
+followed by clusters 15 & 8. Clusters 3, 4, 5, 7, 9, 10 12 & 14 have weaker net charge densities.
+Clusters 1, 11 & 13 are all highly negative charged with 13 being the highest. Interestingly,
+both FAM222A and MBP fall into Cluster 2 and Aβ42 falls in to Cluster 1. These clusters are
+significantly oppositely charged.
+
+```{r, echo=FALSE, fig.width=9, fig.height=9}
+par(pty="s")
+plot(intersect.umap[,1], intersect.umap[,2],pch=21,cex = 1.2,col="gray50",
+     main="UMAP Clusters: Colored by Charge Density", xlab="UMAP1", ylab="UMAP2")#,
+#     xlim=c(-12,6),ylim=c(-8,4))
+points(intersect.umap[,1], intersect.umap[,2],pch=20,cex = 1.2,col=alpha(charge.colors,0.5),asp=1)
+text(label.umap[,1], label.umap[,2], labels=rownames(label.umap),cex = 1.6,col="black",asp=1)
+#text(intersect.umap[,1], intersect.umap[,2], labels=rownames(label.umap),cex = 1.6,col="black",asp=1)
+```
+
+
+
+## Change of Charge vs. pH
+
+With our proteins clustered, it's easier to spot general trends in the charge response
+to pH. We'll look at the change of net charge, charge density and the gradient of charge density
+of all the plque proteins.
+
+```{r include=FALSE}
+seq.charges <- seq.charges[profiles$gene.names,]
+seq.densities <- seq.densities[profiles$gene.names,]
+seq.gradient <- (seq.densities[,2:length(seq.densities)]-seq.densities[,1:length(seq.densities)-1])/.01
+seq.curve <- (seq.gradient[,2:length(seq.gradient)]-seq.gradient[,1:length(seq.gradient)-1])/.01
+```
+
+
+This first plot shows the change of the net charge with respect to pH. The black dashed line is 
+the charge of Aβ42. The names of the Cluster 2 proteins are labeled on the side of the plot with
+corresponding to to their net charge at a pH of 7.4. The net charge of Aβ42 is extremely small 
+compared to a lot of the other polypeptides. This is due to the fact that Aβ42 is by far the smallest
+chain in the plaque proteins. This is why it's better to examine charge after its been normalized
+by the AA length, i.e. the charge density.
+```{r, echo=FALSE}
+par(adj = .5-.07)
+
+plot.pHs <- pHs[seq(1, length(pHs), 5)]
+plot.charges <- seq.charges[,seq(1, ncol(seq.charges), 5)]
+
+matplot(plot.pHs,t(plot.charges),t='l',col=alpha(profiles$charge.colors,0.5),
+        main="Net Charge Response to pH",xlab="pH", ylab="Net Charge",
+        lty='solid',lwd=2,xlim=c(5.3,7.8),#ylim=c(-.2,.2),
+        xaxs="i",yaxs="i",axes = FALSE)
+
+
+ticks = c(5.3,5.5, 6.0, 6.5, 7, 7.4)
+axis(side = 1, at = ticks)
+axis(side = 2)
+
+lines(plot.pHs,t(plot.charges)[,"AB42"],col="black",lty="dashed",lwd=4)
+
+clust2.names <- profiles$clusters==2|profiles$gene.names=="AB42"
+#|profiles$gene.names=="CALM2"|profiles$gene.names=="FBXO2"
+clust2.names <- profiles[clust2.names,]$gene.names
+
+plt.coords <- plot.charges[clust2.names,"charge7.4"]
+plt.labels <- rownames(plot.charges[clust2.names,])[order(plt.coords)]
+plt.coords <- plt.coords[order(plt.coords)]
+text(rep(c(7.5,7.7),length(plt.coords)/2),plt.coords,labels=plt.labels,cex = 0.5)
+lines(c(7.4,8),c(.1,.1),col="black")
+lines(c(7.4,8),c(0,0),col="black")
+lines(c(7.4,8),c(-.11,-.11),col="black")
+lines(c(7.4,7.4),c(-.2,.2),col="black")
+
+iso.point <- 5.311137
+
+abline(v=iso.point,col="black",lty="solid",lwd=3)
+abline(h=0,col="black",lty="solid",lwd=1)
+
+
+```
+
+
+This plot similar to before but uses the charge density in place of net charge. As can be seen,
+Aβ42 has one of the highest negative charge densities at pH 7.4. Interestingly, FAM22A has the 
+steepest response to pH. It's charge density goes from -0.079 to 0 over as the pH is lowered, the
+widest range out of any other polypeptide. The This is why charge density was used for clustering. 
+The clustering also shows that we're grouping proteins even over large pH differences. For example, 
+HISTH4A and HIST1H2BC are much highly than the rest of Cluster 2. For our purposes this grouping is
+appropriate because we're trying to identify all of these possible highly positively charged candidates.
+
+
+```{r, echo=FALSE}
+par(adj = .5-.07)
+
+plot.pHs <- pHs[seq(1, length(pHs), 5)]
+plot.densities <- seq.densities[,seq(1, ncol(seq.densities), 5)]
+
+matplot(plot.pHs,t(plot.densities),t='l',col=alpha(profiles$charge.colors,0.5),
+        main="Charge Density Response to pH",xlab="pH", ylab="Charge Density",
+        lty='solid',lwd=2,xlim=c(5.3,7.8),ylim=c(-.2,.2),
+        xaxs="i",yaxs="i",axes = FALSE)
+
+
+ticks = c(5.3,5.5, 6.0, 6.5, 7, 7.4)
+axis(side = 1, at = ticks)
+axis(side = 2)
+
+lines(plot.pHs,t(plot.densities)[,"AB42"],col="black",lty="dashed",lwd=4)
+
+clust2.names <- profiles$clusters==2|profiles$gene.names=="AB42"
+#|profiles$gene.names=="CALM2"|profiles$gene.names=="FBXO2"
+clust2.names <- profiles[clust2.names,]$gene.names
+
+plt.coords <- seq.densities[clust2.names,"charge7.4"]
+plt.labels <- rownames(seq.densities[clust2.names,])[order(plt.coords)]
+plt.coords <- plt.coords[order(plt.coords)]
+text(rep(c(7.5,7.7),length(plt.coords)/2),plt.coords,labels=plt.labels,cex = 0.5)
+
+lines(c(7.4,7.4),c(-.2,.2),col="black")
+
+iso.point <- 5.311137
+
+abline(v=iso.point,col="black",lty="solid",lwd=3)
+abline(h=0,col="black",lty="solid",lwd=1)
+
+
+```
+
+
+If we plot the gradient of the charge density with respect to pH, we can clearly see that Aβ42 
+is the most pH responsive almost over the whole range, up to a pH ~5.5. This the next steepest 
+gradient is that of HBA1 which is identified in Cluster 2. There may be some interesting relationship 
+between Aβ42 strands and HBA1. However, it is difficult to make any assumptions. As a side note, HBA1 
+is also relatively small chain with a high histidine composition and this is probably why it has such
+a steep response to pH.
+
+
+```{r, echo=FALSE}
+par(adj = .5-.07)
+plot.pHs <- pHs[2:length(pHs)]
+plot.pHs <- plot.pHs[seq(1, length(plot.pHs), 5)]
+plot.gradient <- seq.gradient[,seq(1, ncol(seq.gradient), 5)]
+
+matplot(plot.pHs,t(plot.gradient),t='l',col=alpha(profiles$charge.colors,0.5),
+        main="Gradient Response to pH",xlab="pH", ylab="Charge Density Gradient",
+        lty='solid',lwd=2,xlim=c(5.3,7.8),ylim=c(-.07,0),
+        xaxs="i",yaxs="i",axes = FALSE)
+
+ticks = c(5.3, 6.0, 6.5, 7, 7.4)
+axis(side = 1, at = ticks)
+axis(side = 2)
+
+lines(plot.pHs,t(plot.gradient)[,"AB42"],col="black",lty="dashed",lwd=4)
+
+clust2.names <- profiles$clusters==2|profiles$gene.names=="AB42"
+clust2.names <- profiles[clust2.names,]$gene.names
+
+plt.coords <- seq.gradient[clust2.names,"charge7.4"]
+plt.labels <- rownames(seq.gradient[clust2.names,])[order(plt.coords)]
+plt.coords <- plt.coords[order(plt.coords)]
+text(rep(c(7.5,7.7),length(plt.coords)/2),plt.coords,labels=plt.labels,cex = 0.5)
+#lines(c(7.4,8),c(-0.012,-0.012),col="black")
+
+lines(c(7.4,8),c(0,0),col="black")
+lines(c(7.4,7.4),c(-.2,.2),col="black")
+
+iso.point <- 5.311137
+
+abline(v=iso.point,col="black",lty="solid",lwd=3)
+lines(c(0,7.4),c(0,0),col="black",lty="solid",lwd=1)
+
+```
+
+This can be taken step further and we can look at the curvature response to pH. In this,
+We can see two intersections with zero, at pH ~5.5 and ~5.8. This means that the pH response is 
+nearly linear within this range. This is also the range at which optimum aggregation occurs, suggesting 
+something intersting might be occurring with histidine residues at this point. It's too difficult 
+interpret anything meaningful since the net charge calculations are only rough estimates.
+
+
+```{r, echo=FALSE}
+par(adj = .5-.07)
+plot.pHs <- pHs[3:length(pHs)]
+plot.pHs <- plot.pHs[seq(1, length(plot.pHs), 5)]
+plot.curve <- seq.curve[,seq(1, ncol(seq.curve), 5)]
+
+matplot(plot.pHs,t(plot.curve),t='l',col=alpha(profiles$charge.colors,0.5),
+        main="Curvature Response to pH",xlab="pH", ylab="Charge Density",
+        lty='solid',lwd=2,xlim=c(5.3,7.8),ylim=c(-.02,.09),
+        xaxs="i",yaxs="i",axes = FALSE)
+
+ticks = c(5.3,5.5, 6.0, 6.5, 7, 7.4)
+axis(side = 1, at = ticks)
+axis(side = 2)
+
+lines(plot.pHs,t(plot.curve)[,"AB42"],col="black",lty="dashed",lwd=4)
+
+clust2.names <- profiles$clusters==2|profiles$gene.names=="AB42"
+clust2.names <- profiles[clust2.names,]$gene.names
+
+plt.coords <- seq.curve[clust2.names,"charge7.4"]
+plt.labels <- rownames(seq.curve[clust2.names,])[order(plt.coords)]
+plt.coords <- plt.coords[order(plt.coords)]
+text(rep(c(7.5,7.7),length(plt.coords)/2),plt.coords,labels=plt.labels,cex = 0.5)
+lines(c(7.4,8),c(.1,.1),col="black")
+
+
+iso.point <- 5.311137
+
+abline(v=iso.point,col="black",lty="solid",lwd=3)
+lines(c(0,7.4),c(0,0),col="black",lty="solid",lwd=1)
+
+```
+
+
+## Interaction Potential with Abeta 42
+
+Next, we estimated the electrostatic potential between Aβ42 and our other proteins.First,
+let's consider some our limitations. The coloumbic potential energy between any two points
+can be described below:
+
+E = kq1q2/r
+
+Since we want to describe the energetic potential disregarding distance between them, we can 
+disclude the r and since k is just a constant we can rewrite our expression purely using charge
+that is directly proportional to the electrostatic energy/force.
+
+Ecol ~ E = q1q2
+
+Next, we want to describe the total electrostatic potential between all of the residues in two
+proteins. This would be the product of the net charges of the two proteins:
+
+Net Charge: Qi = sum(qi) OR Qj = sum(qj)
+
+Etot = sumi(sumj(qiqj)) = sum(qi)sum(qj) = QiQj
+
+Finally, we want to normalize the charge interaction by the AA lengths of the two proteins:
+
+Enorm = QiQj/(Ni+Nj)
+
+This is how we score the electrostatic potential between Aβ42 and the other proteins.
+
+
+```{r include=FALSE}
+seq.charges <- seq.charges[profiles$gene.names,]
+seq.densities <- seq.densities[profiles$gene.names,]
+
+density.potential <- (as.matrix(seq.charges) %*% t(as.matrix(seq.charges)))/sum.lengths
+density.potential <- density.potential[,1]/dim(seq.densities)[2]
+
+#density.potential <- (as.matrix(seq.densities) %*% t(as.matrix(seq.densities)))[,1]/dim(seq.densities)[2]
+density.potential <- cbind(density.potential, profiles$clusters)
+colnames(density.potential) <- c("interact.potential","clusters")
+density.potential <- as.data.frame(density.potential[,c("clusters","interact.potential")])
+density.potential$clusters <- as.factor(density.potential$clusters)
+
+
+AB42.density.potential <- density.potential$interact.potential[1]
+density.potential[["colors"]] <- profiles$cluster.colors
+density.potential <- density.potential[density.potential$clusters!=0,]
+
+
+
+```
+
+## Interaction Potential with Abeta 42
+
+We can calculate the average interaction potential score over the whole pH range, 5.3-7.4. This
+is shown in the box plot below. Each box represents a cluster and the dots are individual 
+proteins. The positive horizontal dashed line is the repulsive self-interaction potential score of Aβ42.
+The negative horizontal dotted line is the opposite Aβ42 self-interaction potential. In theory, any 
+proteins with an interaction potential around this opposite self-interaction potential would be sufficient
+in overcoming the electrostatic repulsion between two Aβ42 strands. As can be seen, all of the proteins in
+Cluster 2 have significantly greater attractive potential than any other cluster. This isn't surprising
+considering that Cluster 2 has the most negative charge density compared to anybody else. Furthermore, it
+is the only cluster that overlaps with the pposite self-interaction potential of Aβ42.
+
+```{r, echo=FALSE}
+(ggplot(density.potential, aes(x=clusters, y=interact.potential,
+                               fill=clusters))
+  + ggtitle("Electrostatic Interaction Potential")
+  + geom_boxplot(outlier.shape = NA,fatten=0,alpha=0.5)
+  + scale_fill_manual(values=unique(density.potential$colors))
+  + geom_point(size=2,colour=density.potential$colors,alpha = 0.5)
+  + geom_point(size=2,colour="black",shape=1,alpha = 0.5)
+  + geom_hline(yintercept = AB42.density.potential,colour="gray20",linetype="dashed")
+  + geom_hline(yintercept = -AB42.density.potential,colour="gray20",linetype="dotted")
+  + xlab("Cluster") + ylab("Charge Density Interaction Score") + labs(fill = "Cluster")
+  + theme_linedraw()
+  + theme(panel.grid.major.x = element_blank(),
+         panel.grid.minor.x = element_blank(),
+         plot.title = element_text(hjust = 0.5)))
+```
+
+
+## Interaction Potential with Abeta 42 over pH Range
+
+We can also show the interaction potential over the whole range of pH values. The plot below shows
+the self-interaction of Aβ42 (black dashed line) goes to zero at it's isoelectric point of 5.31. However,
+it appears to have significantly dropped around 5.5 and it could be that the repulsive electrostatic force 
+between Aβ42 strands becomes insignificant at this level, in which the thermal energy of the system 
+could easily be sufficient to overcome any energetic barriers. This suggests that pH itself is, in fact,
+a strong nucleator when looking in the context of charge-charge interactions. However, the self-interaction
+potential of Aβ42 is still quite high in less acidic pH conditions. This suggests that other factors
+should play an important in the nucleation of Aβ42 in less acidic conditions. This has been shown with presence 
+divalent metal ions and seen in certain cases of proteins, such as FAM222A and MBP (specifically it's degraded
+form). In theory, a strong nucleator should have an attractive interaction with Aβ42 that is balanced with
+the repulsive self-interaction of Aβ42. This can be described in the equation below, where subscript a represents Aβ42
+and b denotes any other polypeptide:
+
+Etot = Eab + Eaa = 0
+
+Eij = -Eaa, where Eaa is always positive
+
+
+```{r include=FALSE}
+seq.charges <- seq.charges[profiles$gene.names,]
+seq.densities <- seq.densities[profiles$gene.names,]
+sum.lengths <- sum.lengths[profiles$gene.names,profiles$gene.names]
+
+interact.ph <- t(t(seq.charges) * t(seq.charges)[,"AB42"])
+normalized.ph <- interact.ph/sum.lengths[,"AB42"]
+compliment.ph <- t(t(normalized.ph)+t(normalized.ph)[,"AB42"])
+
+beg <- seq(1,length(colnames(compliment.ph)),1)[colnames(compliment.ph)=="charge6.35"]
+end <- length(colnames(compliment.ph))
+logRMSDs <- log10(sqrt(rowMeans(compliment.ph[,beg:end])^2))
+scores <- (logRMSDs-mean(logRMSDs))/sd(logRMSDs)
+nucleators <- names(scores)[scores<(-2)]
+```
+
+```{r include =FALSE}
+profiles[["nucleator"]] <- FALSE
+profiles[nucleators,]$nucleator <- TRUE
+#write.table(profiles,"plaque_comp_data/profiles.tsv",sep="\t",row.names=FALSE,col.names=TRUE,quote=FALSE)
+```
+
+
+
+
+
+```{r, echo=FALSE}
+par(adj = .5-.07)
+plot.pHs <- pHs[seq(1, length(pHs), 5)]
+plot.potential <- normalized.ph[,seq(1, ncol(normalized.ph), 5)]
+
+matplot(plot.pHs,t(plot.potential),t='l',col=alpha(profiles$charge.colors,0.5),
+        main="Finding Most-Likely Nucleators",xlab="pH", ylab="Nomalized Interaction Potential",
+        lty='solid',lwd=2,xlim=c(5.3,7.8),ylim=c(-.6,0.6),
+        xaxs="i",yaxs="i",axes = FALSE)
+
+ticks = c(5.3,5.5, 6.0, 6.5, 7, 7.4)
+axis(side = 1, at = ticks)
+axis(side = 2)
+
+lines(plot.pHs,t(plot.potential)[,"AB42"],col="black",lty="dashed",lwd=3)
+lines(plot.pHs,-t(plot.potential)[,"AB42"],col="black",lty="dotted",lwd=3)
+
+legend(5.3, 0.5, legend=c("Abeta42 Self-Interaction", "Ideal Nucleator"),
+       col=c("black", "black"), lty=c("dashed","dotted"),lwd=3, cex=0.8)
+
+clust2.names <- profiles$clusters==2|profiles$gene.names=="AB42"
+#profiles$gene.names=="CALM2"|profiles$gene.names=="FBXO2"
+clust2.names <- profiles[clust2.names,]$gene.names
+
+plt.coords <- normalized.ph[clust2.names,"charge7.4"]
+plt.labels <- rownames(normalized.ph[clust2.names,])[order(plt.coords)]
+plt.coords <- plt.coords[order(plt.coords)]
+text(rep(c(7.5,7.7),length(plt.coords)/2),plt.coords,labels=plt.labels,cex = 0.5)
+
+plt.coords <- normalized.ph[nucleators,"charge7.4"]
+plt.labels <- rownames(normalized.ph[nucleators,])[order(plt.coords)]
+plt.coords <- plt.coords[order(plt.coords)]
+text(rep(c(7.5,7.7),length(plt.coords)/2),plt.coords,labels=plt.labels,cex = 0.5,col="blue")
+
+lines(c(6.35,6.35),c(-.6,.6),col="black")
+bot <- -plot.potential["AB42","charge6.35"]
+top <- -plot.potential["AB42","charge7.4"]
+lines(c(7.4,7.8),c(bot,bot),col="black",lwd=2)
+lines(c(7.4,7.8),c(top,top),col="black",lwd=2)
+
+
+lines(c(7.4,7.4),c(-.6,0.6),col="black")
+lines(c(0,7.4),c(0,0),col="black",lty="solid",lwd=1)
+
+```
+
+If Eij > 0, there is a net repulsive electrostatic force with Aβ42 and the two strands are unlikely to directly
+interact as well as form a complex that that even less likely to draw more Aβ42. If Eab << -Eaa, Aβ42 will interact
+strongly with the protein of interest but would discourage the self-association Aβ42 strands. Ideally, the net 
+interaction potential of nucleator-Aβ42 association is close enough to overcome Aβ42-Aβ42 charge repulsion. Therefore,
+ideal candidates will have an association (Eab) that is equally opposite to Aβ42-Aβ42 charge repulsion (-Eaai) and the
+root mean square difference (RMSD) between the two potentials should be signicantly small. In fact, it is best compute this
+difference over a less acidic pH range. The distance should computed over a range instead of a single pH 
+considering that a strong nucleator should effective under a range of conditions. Furthermore, there are limitations
+to these charge estimates and higher sampling should be considered. Consequently, the RMSD was calculated for the
+upper half of the range, from 6.35 to 7.4. To determine the potentials that were significantly closer, to the ideal
+association potential, the log10 was taken of the RMSDs and a Z-Score was taken to determine the outliers. Any protein 
+with a Z-Score less than -2 was considered an ideal nucleator with respect to electrostatic interactions.
+
+RMSD = sqrt((Eab - (-Eaa))^2) = sqrt((Eab + Eaa)^2)
+logRMSD = log10(RMSD)
+Z-Score = (logRMSD - mean(logRMSD))/sd(logRMSD)
+
+The gene names of all the proteins plotted with their respective Z-Scores. All of the selected ideal nucleators are highlighted
+in blue the text plot below. The names are also highlighted in the plot above. Interestingly, we find our already experimentally 
+determined nucleators (FAM222A and MBP) along with other interesting candidates such as Tubulin Polymerization Promoting Protein 
+(TPPP).
+
+```{r, echo=FALSE}
+plot(seq(length(scores)),scores,t="n",xlim=c(-10,300),
+     main="Most-Likely Nucleators",xlab="", ylab="Z-Score")
+text(seq(length(scores)),scores,labels=names(scores),col="gray30")
+text(seq(length(scores))[scores<(-2)],scores[scores<(-2)],labels=names(scores[scores<(-2)]),col="blue")
+
+```
+
+```{r include=FALSE}
+plot(seq(length(logRMSDs)),logRMSDs,t="n",xlim=c(-10,300),xaxt = "n",
+     main="Most-Likely Nucleators",xlab="", ylab="logRMSD")
+text(seq(length(logRMSDs)),logRMSDs,labels=names(logRMSDs),col="gray30")
+text(seq(length(logRMSDs))[scores<(-2)],logRMSDs[scores<(-2)],labels=names(logRMSDs[scores<(-2)]),col="blue")
+```
+
+Next, a strong nucleator should have a sufficient amount of net charge to accommodate multiple Aβ42
+strands. Therefore, we use the un-normalized potential Etot. The red lines show the self-interaction 
+potential of Aβ42 factored by a negative multiplier. In theory, the number of Aβ42 chains a protein
+can accommodate is equal or greater than the absolute factor of the self-interaction potential in which
+the nucleator-Aβ42 is less than or equal to. For instance, it is estimated that SYN1 can accommodate
+approximately ~6.5 Aβ42 strands at a pH of 7.4 while COX4I1 can accommodate slightly more than 2. This shows 
+that all of the candidates can at least accomdate approximately 2 strands. However, several studies have 
+shown that the net charge of polyelectrolyte complexes can carry excess charge. Therefore, these estimations 
+could possibly underestimating the number of Aβ42 strands that can be accommodated.
+
+```{r, echo=FALSE}
+
+par(adj = .5-.07)
+plot.pHs <- pHs[seq(1, length(pHs), 5)]
+plot.potential <- interact.ph[,seq(1, ncol(interact.ph), 5)]
+plot.potential <- plot.potential[c("AB42",nucleators),]
+
+matplot(plot.pHs,t(plot.potential),t='l',col=alpha(profiles[c("AB42",nucleators),]$charge.colors,0.8),
+        main="Theoretical Degree of Aggregation",xlab="pH", ylab="Net Interaction Potential",
+        lty='solid',lwd=3,xlim=c(5.3,7.85),ylim=c(-90,0),
+        xaxs="i",yaxs="i",axes = FALSE)
+
+ticks = c(5.3,5.5, 6.0, 6.5, 7, 7.4)
+axis(side = 1, at = ticks)
+axis(side = 2)
+
+ideal.pallete <- colorRampPalette(rev(brewer.pal(11,"RdYlBu"))[8:11])
+ideal.pallete <- ideal.pallete(7)
+
+lines(plot.pHs,-t(plot.potential)[,"AB42"],col=ideal.pallete[1],lty="solid",lwd=3)
+lines(plot.pHs,-2*t(plot.potential)[,"AB42"],col=ideal.pallete[2],lty="solid",lwd=3)
+lines(plot.pHs,-3*t(plot.potential)[,"AB42"],col=ideal.pallete[3],lty="solid",lwd=3)
+lines(plot.pHs,-4*t(plot.potential)[,"AB42"],col=ideal.pallete[4],lty="solid",lwd=3)
+lines(plot.pHs,-5*t(plot.potential)[,"AB42"],col=ideal.pallete[5],lty="solid",lwd=3)
+lines(plot.pHs,-6*t(plot.potential)[,"AB42"],col=ideal.pallete[6],lty="solid",lwd=3)
+lines(plot.pHs,-7*t(plot.potential)[,"AB42"],col=ideal.pallete[7],lty="solid",lwd=3)
+
+legend(5.3, -45, legend=seq(-1,-7),title="Self-Interaction Multiplier",
+       col=ideal.pallete, lty="solid",lwd=3, cex=0.8)
+
+clust2.names <- profiles$clusters==2|profiles$gene.names=="AB42"
+clust2.names <- profiles[clust2.names,]$gene.names
+
+
+plt.coords <- interact.ph[nucleators,"charge7.4"]
+plt.labels <- rownames(interact.ph[nucleators,])[order(plt.coords)]
+plt.coords <- plt.coords[order(plt.coords)]
+text(rep(c(7.475,7.625,7.75),length(plt.coords)/3),plt.coords,labels=plt.labels,cex = 0.5,col="blue")
+
+lines(c(6.35,6.35),c(-100,0),col="black")
+lines(c(7.4,8),c(0,0),col="black")
+lines(c(7.4,7.4),c(-100,0),col="black")
+lines(c(0,7.4),c(0,0),col="black",lty="solid",lwd=1)
+
+```
+
+## STRING Network Analysis with Cluster 2 & APP
+
+Now, we examine the macroscopic biological associations within Cluster 2 and the amyloid precursor 
+protein (APP) by using Search Tool for the Retrieval of Interacting Genes/Proteins (STRING). First,
+we search full STRING networks for each of the 18 proteins using the default parameters: a required 
+score of 0.400 (medium confidence) and an FDR stringency of 5% (medium). After this, we concatenate 
+all of the genes in each local network together and perform a Multiple Protein search with this 
+concatenated list. The full final network was imported with a 0 confidence cutoff.
+
+
+```{r include=FALSE}
+files <- paste("plaque_comp_data/STRING/",c("APP",profiles[profiles$clusters==2,]$gene.names),".tsv",sep="")
+string_results <- c()
+for (file in files){
+  temp <- read.table(file = file, sep = '\t',header = FALSE,stringsAsFactor=FALSE)
+  string_results <- rbind(string_results,temp)
+}
+string_results <- as.data.frame(unique(c(string_results$V1,string_results$V2)))
+
+write.table(string_results,"plaque_comp_data/STRING/wAPP_input.tsv",sep="\t",row.names=FALSE,col.names=TRUE,quote=FALSE)
+```
+
+
+```{r include=FALSE}
+clust2_interact <- read.table(file = 'plaque_comp_data/STRING/wAPP_interactions.tsv',
+                              sep = '\t',
+                              header = TRUE,
+                              stringsAsFactor=FALSE)
+score <- clust2_interact$coexpression + clust2_interact$experimentally_determined_interaction
+score[score>0.999] <- 0.999
+#score <- clust2_interact$combined_score
+clust2_interact[["score"]] <- score
+clust2_interact <- clust2_interact[,c("node1","node2","score")]
+clust2.genes <- sort(unique(c(clust2_interact$node1,clust2_interact$node2)))
+```
+
+
+
+
+With the full combined network, an adjaceny matrix was created using only the experimental
+interaction and  coexpression scores, ranging from 0 to 1. Consequently, an weighted undirected
+graph was created using the R package igraph. All of the network proteins were clustered using 
+the Leiden algorithm with a resolution parameter equal to 1. 
+
+```{r include=FALSE}
+clust2_mat <- matrix(rep(0,length(clust2.genes)^2),nrow=length(clust2.genes),ncol=length(clust2.genes))
+diag(clust2_mat) <- 1
+rownames(clust2_mat) <- clust2.genes
+colnames(clust2_mat) <- clust2.genes
+
+for (idx in 1:nrow(clust2_interact)){
+  row <- clust2_interact[idx,]
+  clust2_mat[row$node1,row$node2] <- row$score
+  clust2_mat[row$node2,row$node1] <- row$score
+}
+
+clust2.dist <- 1-clust2_mat
+
+
+clust2_adj <- clust2_mat
+diag(clust2_adj) <- 0
+clust2.graph <- graph_from_adjacency_matrix(clust2_adj, mode = "undirected",weighted=TRUE)
+clust2_adj <- igraph::as_adjacency_matrix(clust2.graph)
+
+set.seed(1)
+leiden.partition <- leiden(clust2_adj,seed=1,resolution_parameter = 1)
+unids <- names(table(leiden.partition)[table(leiden.partition)==1])
+leiden.partition[leiden.partition %in% unids] <- 0
+leiden.cols <- labels2colors(leiden.partition)
+node.cols <- alpha(leiden.cols,0.5)
+
+```
+
+The resulting graph is shown below with all of the labeled Cluster 2 proteins and APP.
+There were four clusters determined by the algorithm. As can be seen, HBA1 falls in its own cluster
+(green) and the histones (HIST1H2BC & HIST1H4F) fall in their own cluster (yellow) along with EEF1A1.
+The red cluster is composed of mostly Krebs Cycle-associated enzymes HADHA, HADHB, GOT2 and ACOT7. 
+The turqoise cluster is composed of inner mitochondrial membrane proteins COX4I1, PHB2 and SLC25A6.
+The most interesting cluster (blue) contains the neuro-specific proteins of APP, TPPP, CNP, SYN1, MBP and
+FAM222A. This cluster also contains both of the experimetally determined nucleators of MBP and 
+FAM222A. However, FAM222A appears to be the most disconnected out the others in the network. This is 
+to be expected since very little is known is about FAM222A. All of the Cluster 2 proteins in this 
+network were also identified as strong nucleator candidates as well. 
+
+```{r, echo=FALSE, fig.width=12, fig.height=12}
+
+vertex.labels <- rownames(clust2_adj)
+label.bool <- !(vertex.labels %in% c("APP","HIST1H4A",rownames(profiles)[profiles$clusters==2]))
+vertex.labels[label.bool] <- ""
+
+set.seed(2)
+plot(simplify(clust2.graph), main = "Clustered STRING Network", vertex.color = node.cols,
+     vertex.label =vertex.labels,vertex.label.color="black",vertex.label.cex=1,
+     edge.arrow.size=0,edge.width=0.5,vertex.frame.color="gray50",
+     vertex.size=5,edge.curved=0)
+```
+
+Next, we can examine the most connected proteins in the network. To do this, we can calculate
+the betweenness centrality of each protein in the network over a range of cutoffs. The most 
+central protein is GAPDH. This is to be expected considering that GAPDH is a "house-keeping" 
+protein and is abundant in all cells. GAPDH was also determined to be one of the most abundant 
+proteins in the amyloid plaques as well. 
+
+
+```{r, echo=FALSE}
+betw.conn <- c()
+cutoffs <- seq(0.1,1,0.1)
+
+for (cutoff in cutoffs){
+  betw.conn  <- cbind(betw.conn,estimate_betweenness(clust2.graph,directed=FALSE,cutoff=cutoff))
+}
+colnames(betw.conn) <- cutoffs
+matplot(cutoffs,t(betw.conn),t="l",lwd=3,col="gray",lty="solid",
+        xlab="Network Cutoff",ylab="Betweenness Centrality",ylim=c(0,3000))
+most.conn <- betw.conn[betw.conn[,10]>2000,]
+#most.conn <- most.conn[rev(order(most.conn[,5])),]
+
+text(0.5,2200,"GAPDH")
+lines(cutoffs,as.vector(most.conn),t="l", main= "Centrality vs. Cutoff",
+         lwd=3,col="red",lty="solid")
+
+```
+
+
+We can look at the connections between GAPDH and all of the other proteins. As can be seen, 
+GAPDH is directly connected to all of the clusters. GAPDH and its connections are highlighted 
+in red.
+
+```{r, echo=FALSE, fig.width=12, fig.height=12}
+conn.colors <- node.cols
+conn.colors <- adjustcolor(conn.colors,alpha.f = .2)
+conn.colors[rownames(clust2_adj) %in% rownames(profiles)[profiles$clusters==2]] <- node.cols[rownames(clust2_adj) %in% rownames(profiles)[profiles$clusters==2]]
+conn.colors[rownames(clust2_adj) %in% c("GAPDH")] <- "red"
+
+vertex.labels <- rownames(clust2_adj)
+label.bool <- !(vertex.labels %in% c("GAPDH","APP","BACE1","APOE",rownames(profiles)[profiles$clusters==2]))
+vertex.labels[label.bool] <- ""
+
+CNP.edges <- as_data_frame(clust2.graph,what=c("edges"))
+edge.colors <- rep("gray",dim(CNP.edges)[1])
+edge.colors <- adjustcolor(edge.colors,alpha.f = .5)
+edge.colors[(CNP.edges$from=="GAPDH")|(CNP.edges$to=="GAPDH")] <- "red"
+edge.widths <- rep(0.5,dim(CNP.edges)[1])
+edge.widths[(CNP.edges$from=="GAPDH")|(CNP.edges$to=="GAPDH")] <- 1
+
+set.seed(2)
+plot(simplify(clust2.graph), main = "STRING Network: GAPDH Connections", vertex.label = vertex.labels,layout=layout.fruchterman.reingold,
+     vertex.label.color="black",vertex.label.cex=1,
+     vertex.color = conn.colors,vertex.frame.color="gray50",vertex.cex=0.1,
+     edge.arrow.size=0,edge.width=edge.widths,edge.color=edge.colors,
+     vertex.size=5,edge.curved=0)
+```
+
+However, we're more interested in the proteins that are directly connected to Alzheimer's.
+For this, we can look at the connections between three of the mosthighly Alzheimer's-associated 
+genes APP, BACE1 and APOE. APP and its connections are highlighted in red within the graph below.
+Both, TPPP and MBP are directly connected to APP. 
+
+```{r, echo=FALSE, fig.width=12, fig.height=12}
+#conn.colors <- rep("gray",dim(clust2_adj)[1])
+conn.colors <- node.cols
+conn.colors <- adjustcolor(conn.colors,alpha.f = .2)
+conn.colors[rownames(clust2_adj) %in% rownames(profiles)[profiles$clusters==2]] <- node.cols[rownames(clust2_adj) %in% rownames(profiles)[profiles$clusters==2]]
+conn.colors[rownames(clust2_adj) %in% c("APP")] <- "red"
+
+vertex.labels <- rownames(clust2_adj)
+label.bool <- !(vertex.labels %in% c("GAPDH","APP","BACE1","APOE","HIST1H4A",rownames(profiles)[profiles$clusters==2]))
+vertex.labels[label.bool] <- ""
+
+CNP.edges <- as_data_frame(clust2.graph,what=c("edges"))
+edge.colors <- rep("gray",dim(CNP.edges)[1])
+edge.colors <- adjustcolor(edge.colors,alpha.f = .5)
+edge.colors[(CNP.edges$from=="APP")|(CNP.edges$to=="APP")] <- "red"
+edge.widths <- rep(0.5,dim(CNP.edges)[1])
+edge.widths[(CNP.edges$from=="APP")|(CNP.edges$to=="APP")] <- 1
+
+set.seed(2)
+plot(simplify(clust2.graph), main = "STRING Network: APP Connections", vertex.label = vertex.labels,
+     vertex.label.color="black",vertex.label.cex=1,
+     vertex.color = conn.colors,vertex.frame.color="gray50",vertex.cex=0.1,
+     edge.arrow.size=0,edge.width=edge.widths,edge.color=edge.colors,
+     vertex.size=5,edge.curved=0)
+```
+
+
+Here, BACE1 and its connections are highlighted in red within the graph below.
+Both, SYN1 and MBP are directly connected to BACE1. 
+
+```{r, echo=FALSE, fig.width=12, fig.height=12}
+#conn.colors <- rep("gray",dim(clust2_adj)[1])
+conn.colors <- node.cols
+conn.colors <- adjustcolor(conn.colors,alpha.f = .2)
+conn.colors[rownames(clust2_adj) %in% rownames(profiles)[profiles$clusters==2]] <- node.cols[rownames(clust2_adj) %in% rownames(profiles)[profiles$clusters==2]]
+conn.colors[rownames(clust2_adj) %in% c("BACE1")] <- "red"
+
+vertex.labels <- rownames(clust2_adj)
+label.bool <- !(vertex.labels %in% c("GAPDH","APP","BACE1","APOE",rownames(profiles)[profiles$clusters==2]))
+vertex.labels[label.bool] <- ""
+
+CNP.edges <- as_data_frame(clust2.graph,what=c("edges"))
+edge.colors <- rep("gray",dim(CNP.edges)[1])
+edge.colors <- adjustcolor(edge.colors,alpha.f = .5)
+edge.colors[(CNP.edges$from=="BACE1")|(CNP.edges$to=="BACE1")] <- "red"
+edge.widths <- rep(0.5,dim(CNP.edges)[1])
+edge.widths[(CNP.edges$from=="BACE1")|(CNP.edges$to=="BACE1")] <- 1
+
+set.seed(2)
+plot(simplify(clust2.graph), main = "STRING Network: BACE1 Connections", vertex.label = vertex.labels,
+     vertex.label.color="black",vertex.label.cex=1,
+     vertex.color = conn.colors,vertex.frame.color="gray50",vertex.cex=0.1,
+     edge.arrow.size=0,edge.width=edge.widths,edge.color=edge.colors,
+     vertex.size=5,edge.curved=0)
+```
+
+
+Here, APOE and its connections are highlighted in red within the graph below.
+Only SYN1 is directly connected to APOE.
+
+```{r, echo=FALSE, fig.width=12, fig.height=12}
+
+conn.colors <- node.cols
+conn.colors <- adjustcolor(conn.colors,alpha.f = .2)
+conn.colors[rownames(clust2_adj) %in% rownames(profiles)[profiles$clusters==2]] <- node.cols[rownames(clust2_adj) %in% rownames(profiles)[profiles$clusters==2]]
+conn.colors[rownames(clust2_adj) %in% c("APOE")] <- "red"
+
+vertex.labels <- rownames(clust2_adj)
+label.bool <- !(vertex.labels %in% c("GAPDH","APP","BACE1","APOE",rownames(profiles)[profiles$clusters==2]))
+vertex.labels[label.bool] <- ""
+
+CNP.edges <- as_data_frame(clust2.graph,what=c("edges"))
+edge.colors <- rep("gray",dim(CNP.edges)[1])
+edge.colors <- adjustcolor(edge.colors,alpha.f = .5)
+edge.colors[(CNP.edges$from=="APOE")|(CNP.edges$to=="APOE")] <- "red"
+edge.widths <- rep(0.5,dim(CNP.edges)[1])
+edge.widths[(CNP.edges$from=="APOE")|(CNP.edges$to=="APOE")] <- 1
+
+set.seed(2)
+plot(simplify(clust2.graph), main = "STRING Network: APOE Connections", vertex.label = vertex.labels,
+     vertex.label.color="black",vertex.label.cex=1,
+     vertex.color = conn.colors,vertex.frame.color="gray50",vertex.cex=0.1,
+     edge.arrow.size=0,edge.width=edge.widths,edge.color=edge.colors,
+     vertex.size=5,edge.curved=0)
+```
+
+
+
+
+```{r include=FALSE}
+clust2.names <- profiles$clusters==2
+clust2.names <- profiles[clust2.names,]$gene.names
+
+leiden.df <- data.frame(row.names=rownames(clust2_adj)[rownames(clust2_adj) %in% profiles[profiles$clusters==2,]$gene.names],
+                        leiden.clusters = leiden.partition[rownames(clust2_adj) %in% profiles[profiles$clusters==2,]$gene.names],
+                        leiden.colors = leiden.cols[rownames(clust2_adj) %in% profiles[profiles$clusters==2,]$gene.names])
+leiden.df <- leiden.df[clust2.names,]
+
+profiles.sorted <- profiles
+leiden.clusters <- rep(0,dim(profiles.sorted)[1])
+leiden.colors <- rep("gray",dim(profiles.sorted)[1])
+leiden.clusters[rownames(profiles.sorted) %in% clust2.names] <- leiden.df$leiden.clusters
+leiden.colors[rownames(profiles.sorted) %in% clust2.names] <- leiden.df$leiden.colors
+profiles.sorted[["leiden.clusters"]] <- leiden.clusters
+profiles.sorted[["leiden.colors"]] <- leiden.colors
+profiles.sorted <- profiles.sorted[order(profiles.sorted$clusters),]
+profiles.sorted <- profiles.sorted[order(profiles.sorted$leiden.clusters),]
+
+profiles.sorted <- rbind(profiles.sorted[profiles.sorted$clusters==2,],
+                         profiles.sorted[profiles.sorted$clusters!=2,])
+profiles.sorted <- rbind(profiles.sorted[profiles.sorted$leiden.clusters==2,],
+                         profiles.sorted[profiles.sorted$leiden.clusters!=2,])
+
+
+write.table(profiles.sorted,"plaque_comp_data/profiles_sorted.tsv",sep="\t",row.names=FALSE,col.names=TRUE,quote=FALSE)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

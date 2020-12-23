@@ -1,7 +1,6 @@
 # AB_nucleation
 For amyloid to form, Aβ must be nucleated into aggregated Aβ seeds. Fibril formation is characterized by this slow nucleation step, proceeded by a fast growth phase. Recent studies show the presence of certain proteins at the center of Aβ plaques, most notably FAM222A and MBP have been discovered at the core of plaques. These studies suggest there are proteins that could potentially promote primary nucleation. Nucleation can be promoted by several other factors such as positively charged metal ions (Cu2+) and low pH levels. However, only a handful studies have examined protein-based nucleation. Here, we look at the protein composition of these plaques and identify potential nucleators, proteins that promote Aβ42 nucleation. We define several basic conditions for potential nuceators: (1) A nucleator must have a attractive charge interaction with Aβ42 that is balanced with the repulsive self-interaction of Aβ42; (2) There is sufficient attractive potential between the nucleator and Aβ42 to accommodate multiple strands of Aβ42; (3) There is specific-interaction potential with the N-terminal end of Aβ42. We analyzed these conditions by evaluating the charge-composition of these plaque proteins with pH ranging from the theoretical isoelectric point of Aβ42, 5.31, to standard physiological pH, 7.4. Here, we determine a list of nucleator candidates and examine biologically known associations of these proteins with APP-related proteins via STRING network analysis. In a separate part, we follow this by examining differential expression in both bulk and single-cell RNAseq.
 
-First Header  | Second Header
-------------- | -------------
-Content Cell  | Content Cell
-Content Cell  | Content Cell
+   Part           |    Notebook File  |  HTML File
+-------------     | ----------------- | ------------- 
+Plaque Compostion | [plaque_comp.Rmd](https://github.com/cegallo2/AB_nucleation/blob/main/plaque_comp.Rmd) | [plaque_comp.html](https://htmlpreview.github.io/?https://github.com/cegallo2/AB_nucleation/blob/main/plaque_comp.html) | 
